@@ -164,12 +164,12 @@ static bool load_libvlc_module(void)
 
 extern struct obs_source_info vlc_source_info;
 
-bool load_libvlc(void)
+bool load_libvlc(int argc, char **argv)
 {
 	if (libvlc)
 		return true;
 
-	libvlc = libvlc_new_(0, 0);
+	libvlc = libvlc_new_(argc, argv);
 	if (!libvlc) {
 		blog(LOG_INFO, "Couldn't create libvlc instance");
 		return false;

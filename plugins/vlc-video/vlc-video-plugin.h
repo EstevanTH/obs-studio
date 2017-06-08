@@ -15,7 +15,7 @@ typedef SSIZE_T ssize_t;
 extern libvlc_instance_t *libvlc;
 extern uint64_t time_start;
 
-extern bool load_libvlc(void);
+extern bool load_libvlc(int argc, char **argv);
 
 /* libvlc core */
 typedef libvlc_instance_t *(*LIBVLC_NEW)(int argc, const char *const *argv);

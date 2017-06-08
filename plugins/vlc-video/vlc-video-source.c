@@ -17,6 +17,7 @@
 #define S_BEHAVIOR_STOP_RESTART        "stop_restart"
 #define S_BEHAVIOR_PAUSE_UNPAUSE       "pause_unpause"
 #define S_BEHAVIOR_ALWAYS_PLAY         "always_play"
+#define S_GLOBAL_OPTIONS               "vlc_global_options"
 
 #define T_(text) obs_module_text(text)
 #define T_PLAYLIST                     T_("Playlist")
@@ -26,6 +27,7 @@
 #define T_BEHAVIOR_STOP_RESTART        T_("PlaybackBehavior.StopRestart")
 #define T_BEHAVIOR_PAUSE_UNPAUSE       T_("PlaybackBehavior.PauseUnpause")
 #define T_BEHAVIOR_ALWAYS_PLAY         T_("PlaybackBehavior.AlwaysPlay")
+#define T_GLOBAL_OPTIONS               T_("VlcGlobalOptions")
 
 /* ------------------------------------------------------------------------- */
 
@@ -55,6 +57,14 @@ struct vlc_source {
 	enum behavior behavior;
 	bool loop;
 	bool shuffle;
+	
+	int argc;
+	char **argv;
+};
+
+struct vlc_global_option {
+	char *option;
+	struct vlc_global_option *next;
 };
 
 static libvlc_media_t *get_media(struct darray *array, const char *path)
@@ -263,6 +273,7 @@ static const char *vlcs_get_name(void *unused)
 static void vlcs_destroy(void *data)
 {
 	struct vlc_source *c = data;
+	int i;
 
 	if (c->media_list_player) {
 		libvlc_media_list_player_stop_(c->media_list_player);
@@ -274,6 +285,11 @@ static void vlcs_destroy(void *data)
 
 	bfree((void*)c->audio.data[0]);
 	obs_source_frame_free(&c->frame);
+
+	for (i = 1; i < c->argc; ++i) {
+		free(c->argv[i]);
+	}
+	free(c->argv);
 
 	free_files(&c->files.da);
 	pthread_mutex_destroy(&c->mutex);
@@ -702,6 +718,99 @@ static void vlcs_stopped(const struct libvlc_event_t *event, void *data)
 	UNUSED_PARAMETER(event);
 }
 
+static inline void vlc_apply_global_options(struct vlc_source *c, obs_data_t *settings)
+{
+	int i;
+	int j;
+	int k;
+	bool quoting = false;
+	int option_at = -1;
+	int option_len;
+	char *option_str = 0;
+	int option_count = 0;
+	struct vlc_global_option *option_list = 0;
+	struct vlc_global_option *option_list_el = 0;
+	struct vlc_global_option *option_list_prev = 0;
+	const char *options = obs_data_get_string(settings, S_GLOBAL_OPTIONS);
+
+	// Ne pas oublier de libérer la mémoire des options de ligne de commande dans vlcs_destroy().
+	// Bien vérifier la conformité de argv.
+
+	for (i = 0; options[i]; ++i) {
+		if (options[i] == '"') {
+			quoting = !quoting;
+		}
+		if (option_at == -1) {
+			if (options[i] == '-') {
+				// option begins
+				option_at = i;
+				++option_count;
+			}
+		} else if (options[i+1] == '\0' || (!quoting &&
+			options[i+1] == ' ' && options[i+2] == '-')) {
+			// option completed
+			option_len = i + 1 - option_at;
+			for (j = i; j != option_at; j--) {
+				// remove trailing spaces
+				if (options[j] == ' ') {
+					--option_len;
+				} else {
+					break;
+				}
+			}
+			option_str = malloc((option_len + 1) * sizeof(char));
+			memcpy(option_str, options + option_at, option_len);
+			option_str[option_len] = '\0';
+			for (j = k = 1; option_str[j] != '\0'; ++j) {
+				// j: cursor for reading string
+				// k: cursor for writing string
+				if (option_str[j] == '"') {
+					// remove unescaped quote
+				} else if (option_str[j] == '\\' &&
+					option_str[j+1] == '"') {
+					// unescape escaped quote
+					option_str[k] = '"';
+					++k;
+					++j;
+				} else {
+					option_str[k] = option_str[j];
+					++k;
+				}
+			}
+			option_str[k] = '\0';
+			if (!option_list) {
+				option_list = malloc(sizeof(struct vlc_global_option));
+				option_list_el = option_list;
+			} else {
+				option_list_el->next = malloc(sizeof(struct vlc_global_option));
+				option_list_el = option_list_el->next;
+			}
+			option_list_el->option = option_str;
+			option_list_el->next = 0;
+			option_str = 0;
+			option_at = -1;
+		}
+	}
+
+	if (!option_list) {
+		c->argc = 0;
+		c->argv = 0;
+		return;
+	}
+
+	c->argc = option_count + 1;
+	c->argv = malloc((option_count + 2) * sizeof(char*));
+	c->argv[0] = "dummy";
+	option_list_el = option_list;
+	for (i = 0; i < option_count; ++i) {
+		c->argv[i + 1] = option_list_el->option;
+		option_list_prev = option_list_el;
+		option_list_el = option_list_el->next;
+		free(option_list_prev);
+	}
+	c->argv[option_count + 1] = 0;
+}
+
 static void *vlcs_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct vlc_source *c = bzalloc(sizeof(*c));
@@ -711,7 +820,16 @@ static void *vlcs_create(obs_data_t *settings, obs_source_t *source)
 	if (pthread_mutex_init(&c->mutex, NULL) != 0)
 		goto error;
 
-	if (!load_libvlc())
+	vlc_apply_global_options(c, settings);
+	FILE *debug = fopen("R:\\vlc_apply_global_options.log", "ab"); // debug
+		fprintf(debug, "argc = %d\n", c->argc);
+		for (int i = 0; i < c->argc; ++i) {
+			fprintf(debug, "argv[%d] = %s\n", i, c->argv[i]);
+		}
+		fputc('\n', debug);
+	fclose(debug);
+
+	if (!load_libvlc(c->argc, c->argv))
 		goto error;
 
 	c->media_list_player = libvlc_media_list_player_new_(libvlc);
@@ -743,7 +861,6 @@ static void *vlcs_create(obs_data_t *settings, obs_source_t *source)
 
 	obs_source_update(source, NULL);
 
-	UNUSED_PARAMETER(settings);
 	return c;
 
 error:
@@ -847,6 +964,8 @@ static obs_properties_t *vlcs_properties(void *data)
 	dstr_free(&path);
 	dstr_free(&filter);
 	dstr_free(&exts);
+
+	obs_properties_add_text(ppts, S_GLOBAL_OPTIONS, T_GLOBAL_OPTIONS, OBS_TEXT_DEFAULT);
 
 	return ppts;
 }
